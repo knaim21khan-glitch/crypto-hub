@@ -1,4 +1,7 @@
 import { createContext, useContext, useEffect, useState } from "react";
+import { doc, getDoc, setDoc, updateDoc, onSnapshot } from "firebase/firestore";
+import { auth, db } from "./config/firebase";
+import { onAuthStateChanged } from "firebase/auth";
 
 const Crypto = createContext();
 
@@ -29,6 +32,11 @@ const CryptoContext = ({ children }) => {
   const [currency, setCurrency] = useState("INR");
   const [symbol, setSymbol] = useState("₹");
   const [theme, setTheme] = useState("dark");
+  
+  // Auth and Sync State
+  const [currentUser, setCurrentUser] = useState(null);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncComplete, setSyncComplete] = useState(false);
 
   // Virtual Trading State
   // This is a simulated trading system using dummy money
@@ -57,14 +65,82 @@ const CryptoContext = ({ children }) => {
     saveToLocalStorage("cryptoHub_transactions", transactions);
   }, [transactions]);
 
+  // Sync wallet data to Firestore
+  const syncWalletToFirestore = async (userId) => {
+    try {
+      const walletRef = doc(db, "users", userId);
+      await setDoc(walletRef, {
+        dummyBalance,
+        holdings,
+        transactions,
+        updatedAt: new Date().toISOString()
+      }, { merge: true });
+    } catch (error) {
+      console.error("Error syncing to Firestore:", error);
+    }
+  };
+
+  // Fetch wallet data from Firestore
+  const fetchWalletFromFirestore = async (userId) => {
+    setIsSyncing(true);
+    try {
+      const walletRef = doc(db, "users", userId);
+      const walletSnap = await getDoc(walletRef);
+      
+      if (walletSnap.exists()) {
+        const data = walletSnap.data();
+        setDummyBalance(data.dummyBalance || INITIAL_DUMMY_BALANCE);
+        setHoldings(data.holdings || []);
+        setTransactions(data.transactions || []);
+        
+        // Also save to localStorage
+        saveToLocalStorage("cryptoHub_dummyBalance", data.dummyBalance || INITIAL_DUMMY_BALANCE);
+        saveToLocalStorage("cryptoHub_holdings", data.holdings || []);
+        saveToLocalStorage("cryptoHub_transactions", data.transactions || []);
+      } else {
+        // Create new wallet for new user
+        await syncWalletToFirestore(userId);
+      }
+    } catch (error) {
+      console.error("Error fetching from Firestore:", error);
+    } finally {
+      setIsSyncing(false);
+      setSyncComplete(true);
+    }
+  };
+
+  // Listen for auth state changes
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setCurrentUser(user);
+      if (user) {
+        // User is logged in, fetch their wallet data
+        fetchWalletFromFirestore(user.uid);
+      } else {
+        // User is logged out, use local data
+        setSyncComplete(true);
+      }
+    });
+
+    return unsubscribe;
+  }, []);
+
   useEffect(() => {
     if (currency === "INR") setSymbol("₹");
     else if (currency === "USD") setSymbol("$");
     else if (currency === "NGN") setSymbol("₦");
   }, [currency]);
 
-  // Buy coin with dummy money
-  // This is a simulated trading function using dummy money
+  // Modified setDummyBalance to sync with Firestore
+  const handleSetDummyBalance = (value) => {
+    setDummyBalance(value);
+    // Sync to Firestore if user is logged in
+    if (currentUser) {
+      syncWalletToFirestore(currentUser.uid);
+    }
+  };
+
+  // Buy coin with dummy money - modified to sync with Firestore
   const buyCoin = (coin, quantity, currentPrice) => {
     const totalCost = quantity * currentPrice;
     
@@ -120,14 +196,18 @@ const CryptoContext = ({ children }) => {
     setTransactions(prev => [newTransaction, ...prev]);
     setHoldings(newHoldings);
 
+    // Sync to Firestore if user is logged in
+    if (currentUser) {
+      syncWalletToFirestore(currentUser.uid);
+    }
+
     return { 
       success: true, 
       message: `Bought ${quantity} ${coin.symbol.toUpperCase()} with dummy money!` 
     };
   };
 
-  // Sell coin with dummy money
-  // This is a simulated trading function using dummy money
+  // Sell coin with dummy money - modified to sync with Firestore
   const sellCoin = (coinId, quantity, currentPrice) => {
     const holdingIndex = holdings.findIndex(h => h.coinId === coinId);
     
@@ -172,6 +252,11 @@ const CryptoContext = ({ children }) => {
     setTransactions(prev => [newTransaction, ...prev]);
     setHoldings(newHoldings);
 
+    // Sync to Firestore if user is logged in
+    if (currentUser) {
+      syncWalletToFirestore(currentUser.uid);
+    }
+
     return { 
       success: true, 
       message: `Sold ${quantity} ${holding.symbol.toUpperCase()} for dummy money!` 
@@ -203,11 +288,16 @@ const CryptoContext = ({ children }) => {
     return holdings.find(h => h.coinId === coinId);
   };
 
-  // Reset virtual trading (for testing)
+  // Reset virtual trading (for testing) - modified to sync with Firestore
   const resetVirtualTrading = () => {
     setDummyBalance(INITIAL_DUMMY_BALANCE);
     setHoldings([]);
     setTransactions([]);
+    
+    // Sync to Firestore if user is logged in
+    if (currentUser) {
+      syncWalletToFirestore(currentUser.uid);
+    }
   };
 
   return (
@@ -219,7 +309,7 @@ const CryptoContext = ({ children }) => {
       setTheme,
       // Virtual Trading - This is a simulated trading system using dummy money
       dummyBalance,
-      setDummyBalance,
+      setDummyBalance: handleSetDummyBalance,
       holdings,
       transactions,
       buyCoin,
@@ -227,7 +317,11 @@ const CryptoContext = ({ children }) => {
       getPortfolioValue,
       getTotalInvested,
       getHolding,
-      resetVirtualTrading
+      resetVirtualTrading,
+      // Sync status
+      isSyncing,
+      syncComplete,
+      currentUser
     }}>
       {children}
     </Crypto.Provider>
